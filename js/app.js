@@ -2,7 +2,8 @@ import { getDocument, GlobalWorkerOptions } from 'https://cdn.jsdelivr.net/npm/p
 import Tesseract from 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js';
 import { zipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.3/esm/browser.js';
 import { PDFDocument } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js';
-import { extractTitle, isStrongTitle } from './title.js';
+import { extractTitle, guessHeadline, isStrongTitle } from './title.js';
+import { compact, headlineRows, inkMask, rowImage, similarity, TARGET_HEIGHTS, vote } from './locate.js';
 
 GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.4.299/build/pdf.worker.min.mjs';
 
@@ -23,6 +24,7 @@ const countEl = document.querySelector('#result-count');
 const clearBtn = document.querySelector('#clear');
 const downloadBtn = document.querySelector('#download-all');
 
+const MEMORY_KEY = 'confirmed-titles';
 const items = [];
 let workerPromise = null;
 let busy = false;
@@ -103,8 +105,15 @@ async function takeFiles(fileList) {
       }
     }
     if (run === token) {
-      const named = items.filter((item) => item.title).length;
-      setStatus(`完成 ${items.length} 頁，讀到比賽標題 ${named} 頁。請核對後再下載。`);
+      harmonize(items.filter((item) => item.run === run));
+      refreshNames();
+      const named = items.filter((item) => item.title && !item.guess).length;
+      const guessed = items.filter((item) => item.title && item.guess).length;
+      const missing = items.length - named - guessed;
+      const parts = [`完成 ${items.length} 頁`, `讀到比賽標題 ${named} 頁`];
+      if (guessed) parts.push(`推測標題 ${guessed} 頁`);
+      if (missing) parts.push(`沒讀到 ${missing} 頁`);
+      setStatus(`${parts.join('，')}。請核對後再下載。`);
     }
   } catch (error) {
     console.error(error);
@@ -154,6 +163,7 @@ async function processFile(file, run, fileIndex, fileCount) {
         canvas,
         title: found.title,
         raw: found.raw,
+        guess: found.guess,
         sourceBytes: bytes,
         pageIndex: pageNumber - 1,
         isPdf: true,
@@ -173,6 +183,7 @@ async function processFile(file, run, fileIndex, fileCount) {
     canvas,
     title: found.title,
     raw: found.raw,
+    guess: found.guess,
     sourceBytes: bytes,
     pageIndex: 0,
     isPdf: false,
@@ -181,7 +192,53 @@ async function processFile(file, run, fileIndex, fileCount) {
 
 function pushItem(draft) {
   const blob = canvasToJpeg(draft.canvas);
-  addItem({ ...draft, blob, error: '' });
+  const known = draft.guess ? '' : rememberedMatch(draft.title);
+  addItem({ ...draft, title: known || draft.title, snapped: Boolean(known && known !== draft.title), blob, error: '' });
+}
+
+function rememberedTitles() {
+  try {
+    return JSON.parse(localStorage.getItem(MEMORY_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function remember(titles) {
+  const list = rememberedTitles().filter((title) => !titles.includes(title));
+  localStorage.setItem(MEMORY_KEY, JSON.stringify([...titles, ...list].slice(0, 60)));
+}
+
+function rememberedMatch(title) {
+  if (!title) return '';
+  let best = '';
+  let bestScore = 0;
+  for (const known of rememberedTitles()) {
+    const score = similarity(title, known);
+    if (score > bestScore) {
+      best = known;
+      bestScore = score;
+    }
+  }
+  return bestScore >= 0.75 ? best : '';
+}
+
+function harmonize(batch) {
+  const pool = batch.filter((item) => item.title && !item.edited && !item.guess);
+  const used = new Set();
+  for (const item of pool) {
+    if (used.has(item)) continue;
+    const cluster = pool.filter((other) => !used.has(other) && other.title.length === item.title.length && similarity(other.title, item.title) >= 0.75);
+    cluster.forEach((other) => used.add(other));
+    if (cluster.length < 2) continue;
+    const merged = vote(cluster.map((other) => ({ text: other.title, confidence: 50 }))).text;
+    for (const other of cluster) setTitle(other, merged);
+  }
+}
+
+function setTitle(item, title) {
+  item.title = title;
+  if (item.input) item.input.value = title;
 }
 
 function addItem(draft) {
@@ -193,6 +250,11 @@ function addItem(draft) {
     blob: draft.blob,
     title: draft.title,
     raw: draft.raw,
+    guess: Boolean(draft.guess),
+    snapped: Boolean(draft.snapped),
+    edited: false,
+    input: null,
+    run: draft.run || token,
     error: draft.error || '',
     sourceBytes: draft.sourceBytes,
     pageIndex: draft.pageIndex,
@@ -213,24 +275,62 @@ async function readOriginal(file, mode) {
   return { title: extractTitle(raw), raw: raw.trim() };
 }
 
+async function readRow(worker, view, row, targetHeight) {
+  const result = await worker.recognize(rowImage(view, row, targetHeight));
+  return { text: compact(result.data.text), confidence: result.data.confidence || 0 };
+}
+
+async function readRowVoted(worker, view, row, first) {
+  const readings = [first];
+  for (const height of TARGET_HEIGHTS) {
+    if (height !== 64) readings.push(await readRow(worker, view, row, height));
+  }
+  return vote(readings);
+}
+
 async function readTitle(canvas) {
   const worker = await ensureWorker();
-  const strip = isWideStrip(canvas);
-  const regions = strip ? [null] : TITLE_BANDS;
-  let best = { title: '', raw: '' };
+  const view = inkMask(canvas);
+  const rows = headlineRows(view).slice(0, 6);
+  await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
 
-  for (const band of regions) {
-    await worker.setParameters({
-      tessedit_pageseg_mode: strip || !band ? '7' : '6',
-      user_defined_dpi: '300',
-    });
-    const view = band ? crop(canvas, band) : pad(canvas, false);
-    const result = await worker.recognize(view);
+  const scanned = [];
+  for (const row of rows) {
+    const reading = await readRow(worker, view, row, 64);
+    scanned.push({ row, reading, title: extractTitle(reading.text) });
+    if (isStrongTitle(scanned[scanned.length - 1].title)) break;
+  }
+
+  const hit = scanned.find((entry) => isStrongTitle(entry.title)) || scanned.find((entry) => entry.title);
+  if (hit) {
+    const voted = await readRowVoted(worker, view, hit.row, hit.reading);
+    return { title: extractTitle(voted.text) || hit.title, raw: voted.text, guess: false };
+  }
+
+  const band = await readBands(canvas);
+  if (band.title) return { ...band, guess: false };
+
+  const guess = scanned
+    .filter((entry) => guessHeadline(entry.reading.text))
+    .sort((a, b) => b.row.height * b.row.span - a.row.height * a.row.span)[0];
+  if (guess) {
+    await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
+    const voted = await readRowVoted(worker, view, guess.row, guess.reading);
+    const title = guessHeadline(voted.text) || guessHeadline(guess.reading.text);
+    return { title, raw: voted.text, guess: true };
+  }
+  return { title: '', raw: band.raw, guess: false };
+}
+
+async function readBands(canvas) {
+  const worker = await ensureWorker();
+  await worker.setParameters({ tessedit_pageseg_mode: '6', user_defined_dpi: '300' });
+  let best = { title: '', raw: '' };
+  for (const band of TITLE_BANDS) {
+    const result = await worker.recognize(crop(canvas, band));
     const raw = result.data.text || '';
     const title = extractTitle(raw);
-    if (isStrongTitle(title) || (title && !best.title)) {
-      best = { title, raw: raw.trim() };
-    }
+    if (isStrongTitle(title) || (title && !best.title)) best = { title, raw: raw.trim() };
     if (isStrongTitle(title)) break;
   }
   return best;
@@ -242,7 +342,7 @@ function isWideStrip(canvas) {
 
 async function renderPdfPage(page) {
   const base = page.getViewport({ scale: 1 });
-  const viewport = page.getViewport({ scale: Math.min(3, 2200 / base.width) });
+  const viewport = page.getViewport({ scale: Math.min(4, 2400 / base.width) });
   const canvas = document.createElement('canvas');
   canvas.width = Math.floor(viewport.width);
   canvas.height = Math.floor(viewport.height);
@@ -386,16 +486,30 @@ function appendCard(item) {
   const body = document.createElement('div');
   const heading = document.createElement('h3');
   heading.textContent = `${item.sourceName} · ${item.pageLabel}`;
+  if (item.guess && item.title) {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = '推測標題';
+    tag.title = '沒找到「○○年……賽」，改用頁面上方字最大的一行';
+    heading.append(' ', tag);
+  } else if (item.snapped) {
+    const tag = document.createElement('span');
+    tag.className = 'tag ok';
+    tag.textContent = '已對照先前標題';
+    heading.append(' ', tag);
+  }
 
   const input = document.createElement('input');
   input.className = 'title-input';
   input.value = item.title;
-  input.placeholder = '沒讀到比賽標題，請自行輸入';
+  input.placeholder = '沒讀到標題，請自行輸入';
   input.setAttribute('aria-label', `${item.sourceName} 的比賽標題`);
   input.addEventListener('input', () => {
     item.title = input.value.trim();
+    item.edited = true;
     refreshNames();
   });
+  item.input = input;
 
   const fileName = document.createElement('p');
   fileName.className = 'file-name';
@@ -405,7 +519,7 @@ function appendCard(item) {
   raw.className = item.error ? 'raw missing' : 'raw';
   if (item.error) raw.textContent = item.error;
   else if (item.raw) raw.textContent = `辨識原文：${item.raw.replace(/\s+/g, ' ')}`;
-  else raw.textContent = '這頁沒有讀到「○○年……賽」這種比賽標題。';
+  else raw.textContent = '這頁沒有讀到可用的標題。';
 
   const actions = document.createElement('div');
   actions.className = 'card-actions';
@@ -417,7 +531,20 @@ function appendCard(item) {
     const index = items.indexOf(item);
     downloadOne(item, `${stems()[index]}${extension()}`);
   });
-  actions.append(save);
+  const applyAll = document.createElement('button');
+  applyAll.type = 'button';
+  applyAll.className = 'ghost';
+  applyAll.textContent = '套用到全部';
+  applyAll.addEventListener('click', () => {
+    if (!item.title) return;
+    for (const other of items) {
+      setTitle(other, item.title);
+      other.edited = true;
+    }
+    refreshNames();
+    setStatus(`已把全部 ${items.length} 頁的標題改成「${item.title}」。`);
+  });
+  actions.append(save, applyAll);
 
   body.append(heading, input, fileName, raw, actions);
   card.append(image, body);
@@ -436,6 +563,7 @@ function refreshNames() {
 async function downloadOne(item, filename) {
   const blob = await outputBlob(item);
   saveBlob(blob, filename);
+  if (item.title) remember([item.title]);
 }
 
 async function downloadAll() {
@@ -457,6 +585,7 @@ async function downloadAll() {
     const zipped = zipSync(files, { level: 6 });
     const stamp = new Date().toISOString().slice(0, 10);
     saveBlob(new Blob([zipped], { type: 'application/zip' }), `比賽標題_${stamp}.zip`);
+    remember([...new Set(items.map((item) => item.title).filter(Boolean))]);
     setStatus(`已下載 ${saved} 個檔案。`);
   } catch (error) {
     console.error(error);

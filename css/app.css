@@ -226,6 +226,22 @@ ol { list-style: none; margin: 0; padding: 0; }
 
 .missing { color: var(--seal); }
 
+.tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--seal);
+  background: rgba(142, 44, 34, 0.08);
+}
+
+.tag.ok {
+  color: var(--ok);
+  background: rgba(45, 106, 79, 0.1);
+}
+
 @media (max-width: 720px) {
   h1 { font-size: 30px; }
   .hero { flex-direction: column; }

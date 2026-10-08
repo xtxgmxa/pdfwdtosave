@@ -65,6 +65,19 @@ export function extractTitle(raw) {
   return best;
 }
 
+const NOT_HEADLINE = /^(獎狀|奖状|證書|证书|感謝狀|賞狀|聘書|結業證書)$/;
+const BODY_LINE = /字第|單位|姓名|組別|名次|特頒|此狀|中華民國/;
+
+export function guessHeadline(raw) {
+  const text = String(raw || '')
+    .replace(/[\uFF10-\uFF19]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/[^\d\u4e00-\u9fff]/g, '');
+  if (text.length < 4 || text.length > 40) return '';
+  if (NOT_HEADLINE.test(text) || BODY_LINE.test(text)) return '';
+  if (!/[\u4e00-\u9fff]{3}/.test(text)) return '';
+  return text;
+}
+
 export function isStrongTitle(title) {
   return Boolean(title) && title.length >= 8 && /\d{2,3}年/.test(title) && /賽/.test(title);
 }
