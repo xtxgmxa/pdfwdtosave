@@ -1,0 +1,7 @@
+node_modules/
+scripts/
+package.json
+package-lock.json
+*.traineddata
+.DS_Store
+Thumbs.db

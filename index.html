@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>比賽標題重新命名</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="hero">
+      <div class="seal" aria-hidden="true">賽</div>
+      <div>
+        <p class="eyebrow">獎狀掃描檔</p>
+        <h1>依比賽標題重新命名</h1>
+        <p class="lead">一次丟進多份 PDF 或圖片。網頁會讀出獎狀上的比賽名稱，例如「114年新北菁英盃全國跆拳道錦標賽」，再用這個標題把每一頁存下來。檔案只在這台電腦處理，不會上傳。</p>
+      </div>
+    </header>
+
+    <section class="panel" aria-labelledby="drop-title">
+      <label id="dropzone" class="dropzone" for="file-input">
+        <span class="drop-kicker" id="drop-title">拖進掃描檔</span>
+        <span class="drop-title">PDF、JPG、PNG 都可以，一次多份</span>
+        <span class="drop-note">或按這裡選擇檔案</span>
+      </label>
+      <input id="file-input" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,.pdf,.jpg,.jpeg,.png,.webp" />
+      <div class="options">
+        <label>
+          存成
+          <select id="format">
+            <option value="jpg">JPG 圖片</option>
+            <option value="pdf">單頁 PDF</option>
+          </select>
+        </label>
+        <p class="hint">同一批裡比賽標題相同時，第二個起檔名會加上 _2、_3。</p>
+      </div>
+    </section>
+
+    <p id="status" class="status" role="status" data-boot="ready">準備完成。第一次辨識會先下載約 2MB 的中文資料。</p>
+
+    <section id="results" class="results" hidden>
+      <div class="results-bar">
+        <h2 id="result-count">辨識結果</h2>
+        <div class="bar-actions">
+          <button id="clear" type="button" class="ghost">清空</button>
+          <button id="download-all" type="button">全部下載</button>
+        </div>
+      </div>
+      <ol id="list"></ol>
+    </section>
+  </main>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
