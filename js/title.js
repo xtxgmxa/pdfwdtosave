@@ -99,6 +99,19 @@ export function extractPlace(raw) {
   return '';
 }
 
+export function extractKind(raw) {
+  const lines = String(raw || '').split(/\n/).map(cleanLine).filter(Boolean);
+  const labeled = lines.filter((line) => /組[別别]/.test(line));
+  const pool = labeled.length ? labeled : lines;
+  for (const line of pool) {
+    const from = line.search(/組[別别]/);
+    const text = from >= 0 ? line.slice(from + 2) : line;
+    if (/團體|團体|團休/.test(text)) return '團體';
+    if (/個人|箇人/.test(text)) return '個人';
+  }
+  return '';
+}
+
 export function isStrongTitle(title) {
   return Boolean(title) && title.length >= 8 && /\d{2,3}年/.test(title) && /賽/.test(title);
 }

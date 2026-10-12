@@ -2,7 +2,7 @@ import { getDocument, GlobalWorkerOptions } from 'https://cdn.jsdelivr.net/npm/p
 import Tesseract from 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js';
 import { zipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.3/esm/browser.js';
 import { PDFDocument } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js';
-import { chooseReading, combineTitleRows, extractPlace, extractTitle, guessHeadline, isStrongTitle } from './title.js';
+import { chooseReading, combineTitleRows, extractKind, extractPlace, extractTitle, guessHeadline, isStrongTitle } from './title.js';
 import { bodyRows, compact, headlineRows, inkMask, rowImage, similarity, vote } from './locate.js';
 
 GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.4.299/build/pdf.worker.min.mjs';
@@ -189,6 +189,7 @@ async function processFile(file, run, fileIndex, fileCount) {
         canvas,
         title: found.title,
         place: found.place,
+        kind: found.kind,
         raw: found.raw,
         guess: found.guess,
         sourceBytes: bytes,
@@ -210,6 +211,7 @@ async function processFile(file, run, fileIndex, fileCount) {
     canvas,
     title: found.title,
     place: found.place,
+    kind: found.kind,
     raw: found.raw,
     guess: found.guess,
     sourceBytes: bytes,
@@ -278,6 +280,7 @@ function addItem(draft) {
     blob: draft.blob,
     title: draft.title,
     place: draft.place || '',
+    kind: draft.kind || '',
     raw: draft.raw,
     guess: Boolean(draft.guess),
     snapped: Boolean(draft.snapped),
@@ -301,7 +304,7 @@ async function readOriginal(file, mode) {
   });
   const result = await worker.recognize(file);
   const raw = result.data.text || '';
-  return { title: extractTitle(raw), place: extractPlace(raw), raw: raw.trim(), guess: false };
+  return { title: extractTitle(raw), place: extractPlace(raw), kind: extractKind(raw), raw: raw.trim(), guess: false };
 }
 
 async function readRow(worker, view, row, targetHeight) {
@@ -319,16 +322,17 @@ async function readTitle(canvas) {
     if (text) lines.push({ text, y0: row.y0, y1: row.y1, height: row.height });
   }
   const joined = combineTitleRows(lines);
-  const place = await readPlace(worker, view);
-  if (joined) return { title: joined, place, raw: lines.map((line) => line.text).join(' / '), guess: false };
+  const details = await readDetails(worker, view);
+  const found = { ...details, raw: lines.map((line) => line.text).join(' / ') };
+  if (joined) return { ...found, title: joined, guess: false };
 
   const band = await readBands(canvas);
-  if (band.title) return { ...band, place, guess: false };
+  if (band.title) return { ...found, ...band, guess: false };
   const guess = lines
     .map((line) => ({ ...line, title: guessHeadline(line.text) }))
     .filter((line) => line.title)
     .sort((a, b) => b.height - a.height)[0];
-  return { title: guess?.title || '', place, raw: guess?.text || band.raw, guess: Boolean(guess?.title) };
+  return { ...found, title: guess?.title || '', raw: guess?.text || band.raw, guess: Boolean(guess?.title) };
 }
 
 async function readHeadline(worker, canvas, row) {
@@ -349,14 +353,23 @@ async function readHeadline(worker, canvas, row) {
   return chooseReading(readings);
 }
 
-async function readPlace(worker, view) {
+async function readDetails(worker, view) {
   await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
+  let place = '';
+  let kind = '';
+  const texts = [];
   for (const row of bodyRows(view)) {
     const reading = await readRow(worker, view, row, 48);
-    const place = extractPlace(reading.text);
-    if (place) return place;
+    texts.push(reading.text);
+    if (!place) place = extractPlace(reading.text);
+    if (!kind) kind = extractKind(reading.text);
+    if (place && kind) break;
   }
-  return '';
+  const joined = texts.join('\n');
+  return {
+    place: place || extractPlace(joined),
+    kind: kind || extractKind(joined),
+  };
 }
 
 async function readBands(canvas) {
@@ -541,8 +554,9 @@ function fallbackStem(item) {
 
 function fileBase(item) {
   const title = safeStem(item.title) || fallbackStem(item);
+  const kind = safeStem(item.kind || '');
   const place = safeStem(item.place || '');
-  return place ? `${title}_${place}` : title;
+  return [title, kind, place].filter(Boolean).join('_');
 }
 
 function stems() {
@@ -599,6 +613,28 @@ function appendCard(item) {
   });
   item.input = input;
 
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+
+  const kindBadge = document.createElement('span');
+  paintKind(kindBadge, item.kind);
+
+  const kindInput = document.createElement('select');
+  kindInput.className = 'kind-input';
+  kindInput.setAttribute('aria-label', `${item.sourceName} 的獎狀類型`);
+  for (const option of [['', '類型未標'], ['個人', '個人'], ['團體', '團體']]) {
+    const node = document.createElement('option');
+    node.value = option[0];
+    node.textContent = option[1];
+    kindInput.append(node);
+  }
+  kindInput.value = item.kind || '';
+  kindInput.addEventListener('change', () => {
+    item.kind = kindInput.value;
+    paintKind(kindBadge, item.kind);
+    refreshNames();
+  });
+
   const placeInput = document.createElement('input');
   placeInput.className = 'place-input';
   placeInput.value = item.place;
@@ -644,9 +680,16 @@ function appendCard(item) {
   });
   actions.append(save, applyAll);
 
-  body.append(heading, input, placeInput, fileName, raw, actions);
+  meta.append(kindBadge, kindInput, placeInput);
+  body.append(heading, input, meta, fileName, raw, actions);
   card.append(image, body);
   listEl.append(card);
+}
+
+function paintKind(badge, kind) {
+  badge.hidden = !kind;
+  badge.textContent = kind;
+  badge.className = `kind-badge ${kind === '團體' ? 'team' : 'solo'}`;
 }
 
 function refreshNames() {
