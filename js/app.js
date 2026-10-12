@@ -2,8 +2,8 @@ import { getDocument, GlobalWorkerOptions } from 'https://cdn.jsdelivr.net/npm/p
 import Tesseract from 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js';
 import { zipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.3/esm/browser.js';
 import { PDFDocument } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js';
-import { extractPlace, extractTitle, guessHeadline, isStrongTitle } from './title.js';
-import { bodyRows, compact, headlineRows, inkMask, rowImage, similarity, TARGET_HEIGHTS, vote } from './locate.js';
+import { chooseReading, combineTitleRows, extractPlace, extractTitle, guessHeadline, isStrongTitle } from './title.js';
+import { bodyRows, compact, headlineRows, inkMask, rowImage, similarity, vote } from './locate.js';
 
 GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.4.299/build/pdf.worker.min.mjs';
 
@@ -27,6 +27,7 @@ const downloadBtn = document.querySelector('#download-all');
 const MEMORY_KEY = 'confirmed-titles';
 const items = [];
 let workerPromise = null;
+let fullWorkerPromise = null;
 let busy = false;
 let token = 0;
 
@@ -144,6 +145,31 @@ async function ensureWorker(onStatus) {
     });
   }
   return workerPromise;
+}
+
+function ensureFullWorker() {
+  if (!fullWorkerPromise) {
+    setStatus('正在下載較完整的中文模型，用來核對標題，大約 27MB，只需一次…');
+    fullWorkerPromise = Tesseract.createWorker('chi_tra', 1, {
+      langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/chi_tra/4.0.0',
+      cachePath: 'chi-tra-full',
+      logger(message) {
+        if (message.status === 'loading language traineddata') {
+          setStatus('正在下載較完整的中文模型…');
+        }
+      },
+    }).then(async (worker) => {
+      await worker.setParameters({
+        tessedit_pageseg_mode: '7',
+        user_defined_dpi: '300',
+      });
+      return worker;
+    }).catch((error) => {
+      fullWorkerPromise = null;
+      throw error;
+    });
+  }
+  return fullWorkerPromise;
 }
 
 async function processFile(file, run, fileIndex, fileCount) {
@@ -283,47 +309,44 @@ async function readRow(worker, view, row, targetHeight) {
   return { text: compact(result.data.text), confidence: result.data.confidence || 0 };
 }
 
-async function readRowVoted(worker, view, row, first) {
-  const readings = [first];
-  for (const height of TARGET_HEIGHTS) {
-    if (height !== 64) readings.push(await readRow(worker, view, row, height));
-  }
-  return vote(readings);
-}
-
 async function readTitle(canvas) {
   const worker = await ensureWorker();
   const view = inkMask(canvas);
-  const rows = headlineRows(view).slice(0, 6);
-  await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
-
-  const scanned = [];
+  const rows = headlineRows(view).slice(0, 4);
+  const lines = [];
   for (const row of rows) {
-    const reading = await readRow(worker, view, row, 64);
-    scanned.push({ row, reading, title: extractTitle(reading.text) });
-    if (isStrongTitle(scanned[scanned.length - 1].title)) break;
+    const text = await readHeadline(worker, canvas, row);
+    if (text) lines.push({ text, y0: row.y0, y1: row.y1, height: row.height });
   }
-
+  const joined = combineTitleRows(lines);
   const place = await readPlace(worker, view);
-  const hit = scanned.find((entry) => isStrongTitle(entry.title)) || scanned.find((entry) => entry.title);
-  if (hit) {
-    const voted = await readRowVoted(worker, view, hit.row, hit.reading);
-    return { title: extractTitle(voted.text) || hit.title, place, raw: voted.text, guess: false };
-  }
+  if (joined) return { title: joined, place, raw: lines.map((line) => line.text).join(' / '), guess: false };
 
   const band = await readBands(canvas);
   if (band.title) return { ...band, place, guess: false };
+  const guess = lines
+    .map((line) => ({ ...line, title: guessHeadline(line.text) }))
+    .filter((line) => line.title)
+    .sort((a, b) => b.height - a.height)[0];
+  return { title: guess?.title || '', place, raw: guess?.text || band.raw, guess: Boolean(guess?.title) };
+}
 
-  const guess = scanned
-    .filter((entry) => guessHeadline(entry.reading.text))
-    .sort((a, b) => b.row.height * b.row.span - a.row.height * a.row.span)[0];
-  if (guess) {
-    await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
-    const voted = await readRowVoted(worker, view, guess.row, guess.reading);
-    const title = guessHeadline(voted.text) || guessHeadline(guess.reading.text);
-    return { title, place, raw: voted.text, guess: true };
+async function readHeadline(worker, canvas, row) {
+  await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
+  const readings = [];
+  for (const height of [64, 84]) {
+    const result = await worker.recognize(grayRow(canvas, row, height));
+    readings.push(compact(result.data.text));
   }
-  return { title: '', place, raw: band.raw, guess: false };
+  try {
+    const full = await ensureFullWorker();
+    await full.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
+    const result = await full.recognize(grayRow(canvas, row, 84));
+    readings.push(compact(result.data.text));
+  } catch (error) {
+    console.error(error);
+  }
+  return chooseReading(readings);
 }
 
 async function readPlace(worker, view) {
@@ -373,7 +396,7 @@ function renderImageFile(file) {
     const image = new Image();
     image.onload = () => {
       const strip = image.width / image.height >= 3.2;
-  const scale = strip ? 1 : Math.max(1, Math.min(2, 1800 / image.width));
+      const scale = strip ? 1 : Math.max(1, Math.min(2, 1800 / image.width));
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(image.width * scale);
       canvas.height = Math.round(image.height * scale);
@@ -387,6 +410,31 @@ function renderImageFile(file) {
     };
     image.src = url;
   });
+}
+
+function grayRow(source, row, targetHeight) {
+  const pad = Math.round(row.height * 0.4);
+  const left = Math.max(0, row.left - pad);
+  const top = Math.max(0, row.y0 - pad);
+  const width = Math.max(1, Math.min(source.width - left, row.right - row.left + pad * 2));
+  const height = Math.max(1, Math.min(source.height - top, row.y1 - row.y0 + pad * 2));
+  const crop = document.createElement('canvas');
+  crop.width = width;
+  crop.height = height;
+  const context = crop.getContext('2d', { willReadFrequently: true });
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, width, height);
+  context.drawImage(source, left, top, width, height, 0, 0, width, height);
+  softenGray(context, width, height);
+  const scale = targetHeight / Math.max(1, row.height);
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(width * scale));
+  out.height = Math.max(1, Math.round(height * scale));
+  const outContext = out.getContext('2d');
+  outContext.imageSmoothingEnabled = true;
+  outContext.imageSmoothingQuality = 'high';
+  outContext.drawImage(crop, 0, 0, out.width, out.height);
+  return out;
 }
 
 function crop(source, band) {
@@ -412,6 +460,26 @@ function pad(source, enhance = true) {
   context.drawImage(source, margin, margin);
   if (enhance) stretchContrast(context, padded.width, padded.height);
   return enhance ? scaleForOcr(padded) : padded;
+}
+
+function softenGray(context, width, height) {
+  const image = context.getImageData(0, 0, width, height);
+  const data = image.data;
+  const gray = new Uint8Array(width * height);
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+    gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+  }
+  const sorted = [...gray].sort((a, b) => a - b);
+  const low = sorted[Math.floor(sorted.length * 0.02)];
+  const high = sorted[Math.ceil(sorted.length * 0.98)];
+  const span = Math.max(1, high - low);
+  for (let p = 0, i = 0; p < gray.length; p += 1, i += 4) {
+    const value = Math.max(0, Math.min(255, ((gray[p] - low) * 255) / span));
+    data[i] = value;
+    data[i + 1] = value;
+    data[i + 2] = value;
+  }
+  context.putImageData(image, 0, 0);
 }
 
 function stretchContrast(context, width, height) {

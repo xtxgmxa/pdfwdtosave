@@ -102,3 +102,73 @@ export function extractPlace(raw) {
 export function isStrongTitle(title) {
   return Boolean(title) && title.length >= 8 && /\d{2,3}年/.test(title) && /賽/.test(title);
 }
+
+const PHRASES = ['菁英盃', '菁英', '中華盃', '中華', '第十二屆', '全國', '跆拳道', '跆拳', '拳道', '錦標賽', '公開賽', '邀請賽'];
+
+export function phraseScore(text) {
+  let score = 0;
+  for (const phrase of PHRASES) {
+    if (text.includes(phrase)) score += phrase.length * 3;
+  }
+  if (/第[一二三四五六七八九十\d]{1,3}屆/.test(text)) score += 8;
+  if (text.includes('錦標賽')) score += 12;
+  return score;
+}
+
+function assemble(readings) {
+  const lattice = readings[0].split('').map((_, index) => [...new Set(readings.map((text) => text[index]))]);
+  let text = '';
+  for (let i = 0; i < lattice.length; i += 1) {
+    let best = lattice[i][0];
+    let bestScore = -1;
+    for (const ch of lattice[i]) {
+      let score = readings.filter((item) => item[i] === ch).length * 2;
+      const prev = text[i - 1] || '';
+      if (PHRASES.some((phrase) => phrase.includes(prev + ch))) score += 6;
+      const next = lattice[i + 1] || [];
+      if (next.some((n) => PHRASES.some((phrase) => phrase.includes(ch + n)))) score += 4;
+      if (score > bestScore) {
+        bestScore = score;
+        best = ch;
+      }
+    }
+    text += best;
+  }
+  return text;
+}
+
+export function chooseReading(readings) {
+  const clean = readings.map((text) => cleanLine(text)).filter((text) => text.length >= 4);
+  if (!clean.length) return '';
+  const ranked = clean
+    .map((text) => ({ text, score: phraseScore(text) }))
+    .sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+  const pool = [...new Set(ranked.filter((item) => item.text.length === ranked[0].text.length).map((item) => item.text))];
+  if (pool.length === 1) return pool[0];
+  const mixed = assemble(pool);
+  return phraseScore(mixed) >= ranked[0].score ? mixed : ranked[0].text;
+}
+
+export function combineTitleRows(entries) {
+  const rows = entries
+    .filter((entry) => entry.text && !/獎狀|單位|姓名|名次|字第|組別/.test(entry.text))
+    .sort((a, b) => a.y0 - b.y0);
+  let best = '';
+  let bestScore = -1;
+  const consider = (text) => {
+    const title = extractTitle(text);
+    if (!title) return;
+    const score = phraseScore(title) + title.length;
+    if (score > bestScore) {
+      best = title;
+      bestScore = score;
+    }
+  };
+  for (const row of rows) consider(row.text);
+  for (let i = 0; i < rows.length - 1; i += 1) {
+    const gap = rows[i + 1].y0 - rows[i].y1;
+    const height = Math.max(rows[i].height, rows[i + 1].height);
+    if (gap < height * 1.25) consider(`${rows[i].text}${rows[i + 1].text}`);
+  }
+  return best;
+}
