@@ -71,6 +71,16 @@ export function textRows({ mask, width, height }) {
   return rows;
 }
 
+export function bodyRows(view) {
+  const { width, height } = view;
+  return textRows(view)
+    .filter((row) => row.y0 > height * 0.32)
+    .filter((row) => row.height >= height * 0.012 && row.height <= height * 0.09)
+    .filter((row) => row.span >= width * 0.1 && row.span <= width * 0.8)
+    .sort((a, b) => b.height - a.height)
+    .slice(0, 8);
+}
+
 export function headlineRows(view) {
   const { width, height } = view;
   return textRows(view)

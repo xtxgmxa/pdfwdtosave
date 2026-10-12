@@ -2,8 +2,8 @@ import { getDocument, GlobalWorkerOptions } from 'https://cdn.jsdelivr.net/npm/p
 import Tesseract from 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js';
 import { zipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.3/esm/browser.js';
 import { PDFDocument } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js';
-import { extractTitle, guessHeadline, isStrongTitle } from './title.js';
-import { compact, headlineRows, inkMask, rowImage, similarity, TARGET_HEIGHTS, vote } from './locate.js';
+import { extractPlace, extractTitle, guessHeadline, isStrongTitle } from './title.js';
+import { bodyRows, compact, headlineRows, inkMask, rowImage, similarity, TARGET_HEIGHTS, vote } from './locate.js';
 
 GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.4.299/build/pdf.worker.min.mjs';
 
@@ -162,6 +162,7 @@ async function processFile(file, run, fileIndex, fileCount) {
         pageLabel: pdf.numPages > 1 ? `第 ${pageNumber} 頁` : '單頁',
         canvas,
         title: found.title,
+        place: found.place,
         raw: found.raw,
         guess: found.guess,
         sourceBytes: bytes,
@@ -182,6 +183,7 @@ async function processFile(file, run, fileIndex, fileCount) {
     pageLabel: '圖片',
     canvas,
     title: found.title,
+    place: found.place,
     raw: found.raw,
     guess: found.guess,
     sourceBytes: bytes,
@@ -249,6 +251,7 @@ function addItem(draft) {
     thumbUrl: draft.blob ? URL.createObjectURL(draft.blob) : '',
     blob: draft.blob,
     title: draft.title,
+    place: draft.place || '',
     raw: draft.raw,
     guess: Boolean(draft.guess),
     snapped: Boolean(draft.snapped),
@@ -272,7 +275,7 @@ async function readOriginal(file, mode) {
   });
   const result = await worker.recognize(file);
   const raw = result.data.text || '';
-  return { title: extractTitle(raw), raw: raw.trim() };
+  return { title: extractTitle(raw), place: extractPlace(raw), raw: raw.trim(), guess: false };
 }
 
 async function readRow(worker, view, row, targetHeight) {
@@ -301,14 +304,15 @@ async function readTitle(canvas) {
     if (isStrongTitle(scanned[scanned.length - 1].title)) break;
   }
 
+  const place = await readPlace(worker, view);
   const hit = scanned.find((entry) => isStrongTitle(entry.title)) || scanned.find((entry) => entry.title);
   if (hit) {
     const voted = await readRowVoted(worker, view, hit.row, hit.reading);
-    return { title: extractTitle(voted.text) || hit.title, raw: voted.text, guess: false };
+    return { title: extractTitle(voted.text) || hit.title, place, raw: voted.text, guess: false };
   }
 
   const band = await readBands(canvas);
-  if (band.title) return { ...band, guess: false };
+  if (band.title) return { ...band, place, guess: false };
 
   const guess = scanned
     .filter((entry) => guessHeadline(entry.reading.text))
@@ -317,9 +321,19 @@ async function readTitle(canvas) {
     await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
     const voted = await readRowVoted(worker, view, guess.row, guess.reading);
     const title = guessHeadline(voted.text) || guessHeadline(guess.reading.text);
-    return { title, raw: voted.text, guess: true };
+    return { title, place, raw: voted.text, guess: true };
   }
-  return { title: '', raw: band.raw, guess: false };
+  return { title: '', place, raw: band.raw, guess: false };
+}
+
+async function readPlace(worker, view) {
+  await worker.setParameters({ tessedit_pageseg_mode: '7', user_defined_dpi: '300' });
+  for (const row of bodyRows(view)) {
+    const reading = await readRow(worker, view, row, 48);
+    const place = extractPlace(reading.text);
+    if (place) return place;
+  }
+  return '';
 }
 
 async function readBands(canvas) {
@@ -457,10 +471,16 @@ function fallbackStem(item) {
   return safeStem(`未辨識_${original}`) || '未辨識標題';
 }
 
+function fileBase(item) {
+  const title = safeStem(item.title) || fallbackStem(item);
+  const place = safeStem(item.place || '');
+  return place ? `${title}_${place}` : title;
+}
+
 function stems() {
   const counts = new Map();
   return items.map((item) => {
-    const base = safeStem(item.title) || fallbackStem(item);
+    const base = fileBase(item);
     const seen = counts.get(base) || 0;
     counts.set(base, seen + 1);
     return seen === 0 ? base : `${base}_${seen + 1}`;
@@ -511,6 +531,16 @@ function appendCard(item) {
   });
   item.input = input;
 
+  const placeInput = document.createElement('input');
+  placeInput.className = 'place-input';
+  placeInput.value = item.place;
+  placeInput.placeholder = '名次，沒有就留空';
+  placeInput.setAttribute('aria-label', `${item.sourceName} 的名次`);
+  placeInput.addEventListener('input', () => {
+    item.place = placeInput.value.trim();
+    refreshNames();
+  });
+
   const fileName = document.createElement('p');
   fileName.className = 'file-name';
   fileName.innerHTML = '存成 <span></span>';
@@ -546,7 +576,7 @@ function appendCard(item) {
   });
   actions.append(save, applyAll);
 
-  body.append(heading, input, fileName, raw, actions);
+  body.append(heading, input, placeInput, fileName, raw, actions);
   card.append(image, body);
   listEl.append(card);
 }

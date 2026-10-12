@@ -78,6 +78,27 @@ export function guessHeadline(raw) {
   return text;
 }
 
+const PLACES = ['冠軍', '亞軍', '季軍', '殿軍', '金牌', '銀牌', '銅牌', '優勝', '優等', '甲等', '佳作', '特優'];
+
+export function extractPlace(raw) {
+  const lines = String(raw || '')
+    .split(/\n/)
+    .map(cleanLine)
+    .filter(Boolean);
+  if (lines.length > 1) lines.push(lines.join(''));
+
+  for (const line of lines) {
+    const labelAt = line.search(/名次|各次|名欠|各欠/);
+    const marked = (labelAt >= 0 ? line.slice(labelAt + 2) : line)
+      .replace(/第([一二三四五六七八九十\d]{1,3})[名寢茗]/g, '第$1名');
+    const ranked = marked.match(/第[一二三四五六七八九十\d]{1,3}名/);
+    if (ranked && (labelAt >= 0 || marked.startsWith(ranked[0]))) return ranked[0];
+    const fixed = PLACES.find((place) => marked.includes(place));
+    if (fixed && (labelAt >= 0 || marked.startsWith(fixed))) return fixed;
+  }
+  return '';
+}
+
 export function isStrongTitle(title) {
   return Boolean(title) && title.length >= 8 && /\d{2,3}年/.test(title) && /賽/.test(title);
 }
